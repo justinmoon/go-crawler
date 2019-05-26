@@ -9,69 +9,43 @@ import (
 	"github.com/btcsuite/btcd/connmgr"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-
-	"github.com/golang-collections/go-datastructures/queue"
 )
 
 //type Failure string
 
 // globals
-var connected = make(chan struct{})
-var addrsReceived = make(chan []*wire.NetAddress)
-
-//var connectionFailed = make(chan []*wire.NetAddress)
-
 var getaddrSent = make(chan struct{}) // TODO: delete
 
 // q contains addresses we need to visit
-var q = queue.New(int64(10000000))
-
-// online is the addresses we've successfully visited
-var online = make([]*peer.Peer, 1000)
-
-// offline is the addresses we weren't able to visit
-var offline = make([]*peer.Peer, 1000)
-
-// HandleVersion prints when we've received a version message
-func HandleVersion(p *peer.Peer, msg *wire.MsgVersion) *wire.MsgReject {
-	fmt.Println("received version")
-	return nil
-}
+var inbox = make(chan *wire.NetAddress)
+var online = make([]*peer.Peer, 2)
+var offline = make([]*peer.Peer, 2)
 
 // HandleVerack prints when we've received a verack message
 func HandleVerack(p *peer.Peer, msg *wire.MsgVerAck) {
-	fmt.Println("received verack")
-	//connected <- struct{}{}
 	getaddr := wire.NewMsgGetAddr()
 	p.QueueMessage(getaddr, getaddrSent)
 	<-getaddrSent
-	fmt.Println("sent getaddr")
+	online = append(online, p)
 }
 
 // HandleAddr prints when we've received a verack message
-func HandleAddr(p *peer.Peer, msg *wire.MsgAddr) {
-	fmt.Printf("received %d addr\n", len(msg.AddrList))
-	if len(msg.AddrList) > 1 {
-		addrsReceived <- msg.AddrList
-	}
-}
-
 // queryDNS loads some initial wire.NetAddress instances
-// into the queue
-func queryDNS(q *queue.Queue) {
+// into the inbox channel
+func queryDNS() {
 	params := chaincfg.MainNetParams
 	defaultRequiredServices := wire.SFNodeNetwork
 	connmgr.SeedFromDNS(&params, defaultRequiredServices,
 		net.LookupIP, func(addrs []*wire.NetAddress) {
-			fmt.Println("dns addrs: ", addrs)
 			for _, addr := range addrs {
-				q.Put(*addr)
+				inbox <- addr
 			}
 		})
-	<-time.After(time.Second * 10)
+	<-time.After(time.Second * 10) // HACK!!!
 }
 
-func handshake(addr wire.NetAddress) *peer.Peer {
+func handshake(addr wire.NetAddress) {
+	var finished = make(chan bool)
 	peerCfg := &peer.Config{
 		UserAgentName:    "mooniversity",
 		UserAgentVersion: "0.0.1",
@@ -79,56 +53,75 @@ func handshake(addr wire.NetAddress) *peer.Peer {
 		Services:         0,
 		TrickleInterval:  time.Second * 10,
 		Listeners: peer.MessageListeners{
-			OnVersion: HandleVersion,
-			OnVerAck:  HandleVerack,
-			OnAddr:    HandleAddr,
+			OnVerAck: HandleVerack,
+			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
+				if len(msg.AddrList) > 1 {
+					fmt.Printf("received %d addr from %s\n", len(msg.AddrList), addr.IP)
+					for _, addr := range msg.AddrList {
+						inbox <- addr
+					}
+				}
+				finished <- true
+			},
 		},
 	}
-	//addr := "92.106.102.25:8333"
-	//addr := "195.168.36.20:8333"
-	//addr := "109.239.79.181:8333"
-	a := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
-	p, err := peer.NewOutboundPeer(peerCfg, a)
+	// hack to format ipv6 strings
+	addrString := fmt.Sprintf("[%s]:%d", addr.IP, addr.Port)
+	p, err := peer.NewOutboundPeer(peerCfg, addrString)
 	if err != nil {
 		fmt.Printf("NewOutboundPeer: error %v\n", err)
-		panic("outbound error")
+		offline = append(offline, p)
+		//panic("outbound error")
 	}
 
 	// Establish the connection to the peer address and mark it connected.
-	fmt.Println("starting tcp connection")
 	conn, err := net.Dial("tcp", p.Addr())
-	fmt.Println("tcp connection established")
 	if err != nil {
 		fmt.Printf("net.Dial: error %v\n", err)
-		panic("net.Dial error")
+		offline = append(offline, p)
+		//panic("net.Dial error")
+		return
 	}
 	p.AssociateConnection(conn)
-	fmt.Println("finished AssociateConnection")
 
-	// Wait for the verack message or timeout in case of failure.
+	// wait for completion or timeout
 	select {
-	//case <-connected:
-	//return p
-	case addrs := <-addrsReceived:
-		q.Put(addrs)
-	case <-time.After(time.Second * 10):
-		fmt.Println("verack timeout")
-		// Disconnect the peer.
-		p.Disconnect()
-		p.WaitForDisconnect()
-		panic("verack timeout")
+	case <-finished:
+		// do nothing
+	case <-time.After(time.Second * 3):
+		offline = append(offline, p)
 	}
+	p.Disconnect()
+	p.WaitForDisconnect()
+}
 
-	fmt.Println("queue size: ", q.Len())
-	top, err := q.Get(1)
-	fmt.Println("queue get: ", top)
-	return p
+func worker() {
+	for true {
+		addr := <-inbox
+		handshake(*addr)
+	}
+}
+
+func collect() {
+	for true {
+		// print a report
+		fmt.Printf("online %d, offline %d, inbox %d\n",
+			len(online), len(offline), len(inbox))
+
+		// sleep until next loop
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func main() {
-	queryDNS(q)
-	addrInterface, _ := q.Get(1) // returns some stupid interface
-	first := addrInterface[0]
-	peer := handshake(first.(wire.NetAddress))
-	fmt.Println("peer created: ", peer)
+	// launch workers
+	for i := 1; i < 1000; i++ {
+		go worker()
+	}
+
+	// query dns seeds
+	go queryDNS()
+
+	// enter status look
+	collect()
 }
