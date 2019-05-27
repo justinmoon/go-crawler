@@ -136,7 +136,7 @@ func NToS(node Node) string {
 // `nodes` if we receive one
 func visit(node *Node) {
 	var finished = make(chan bool)
-	var handshakeSuccessful = false
+	var handshakeSuccessful = false // HACK
 	peerCfg := &peer.Config{
 		UserAgentName:    "mooniversity",
 		UserAgentVersion: "0.0.1",
@@ -145,14 +145,18 @@ func visit(node *Node) {
 		TrickleInterval:  time.Second * 10,
 		Listeners: peer.MessageListeners{
 			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
+				// send getaddr
 				getaddr := wire.NewMsgGetAddr()
-				getaddrSent := make(chan struct{}) // TODO: delete
+				getaddrSent := make(chan struct{})
+				// FIXME: ugly but q.QueueMessage demands it
 				p.QueueMessage(getaddr, getaddrSent)
 				<-getaddrSent
+				// bookkeeping
 				makeVisit(*node)
 				handshakeSuccessful = true
 			},
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
+				// save new addresses to `nodes` map
 				if len(msg.AddrList) > 1 {
 					addNodes(msg.AddrList)
 					finished <- true
@@ -186,6 +190,7 @@ func visit(node *Node) {
 		}
 	}
 
+	// close TCP connection
 	p.Disconnect()
 	p.WaitForDisconnect()
 }
