@@ -19,7 +19,10 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
+// globals
 var lock = sync.RWMutex{}
+var inbox = make(chan Node, 10000000)
+var nodes = make(map[string]Node)
 
 // Node represents a bitcoin peer
 type Node struct {
@@ -29,12 +32,14 @@ type Node struct {
 	LastVisitMissed int
 }
 
+// update single record in `nodes` map
 func writeNode(node Node) {
 	lock.Lock()
 	defer lock.Unlock()
 	nodes[node.IP] = node
 }
 
+// read single record in `nodes` map
 func readNode(ip string) (Node, bool) {
 	lock.RLock()
 	defer lock.RUnlock()
@@ -42,6 +47,7 @@ func readNode(ip string) (Node, bool) {
 	return node, ok
 }
 
+// add a list of wire.NetAddress's to `nodes` map
 func addNodes(AddrList []*wire.NetAddress) {
 	for _, addr := range AddrList {
 		ip := addr.IP.String()
@@ -53,6 +59,7 @@ func addNodes(AddrList []*wire.NetAddress) {
 	}
 }
 
+// look up entries in `nodes` which haven't missed a visit
 func onlineNodes() []Node {
 	lock.RLock()
 	defer lock.RUnlock()
@@ -65,6 +72,7 @@ func onlineNodes() []Node {
 	return n
 }
 
+// look up entries in `nodes` which have missed a visit
 func offlineNodes() []Node {
 	lock.RLock()
 	defer lock.RUnlock()
@@ -77,6 +85,7 @@ func offlineNodes() []Node {
 	return n
 }
 
+// look up entries in `nodes` which we haven't yet attempted to visit
 func untouchedNodes() []Node {
 	lock.RLock()
 	defer lock.RUnlock()
@@ -89,6 +98,7 @@ func untouchedNodes() []Node {
 	return n
 }
 
+// increment `visitsMissed` on a `nodes` record
 func missVisit(node Node) {
 	node.VisitsMissed = 1
 	//if node.VisitsMissed == -1 {
@@ -100,20 +110,14 @@ func missVisit(node Node) {
 	writeNode(node)
 }
 
+// rese `visitsMissed` to 0 for a `nodes` record
 func makeVisit(node Node) {
 	node.VisitsMissed = 0
 	writeNode(node)
 }
 
-var nodes = make(map[string]Node)
-
-// q contains addresses we need to visit
-var inbox = make(chan Node, 10000000)
-
 // HandleVerack prints when we've received a verack message
-
-// queryDNS loads some initial wire.NetAddress instances
-// into the inbox channel
+// load some wire.NetAddress instances into the inbox channel
 func queryDNS() {
 	params := chaincfg.MainNetParams
 	defaultRequiredServices := wire.SFNodeNetwork
@@ -122,13 +126,17 @@ func queryDNS() {
 	<-time.After(time.Second * 10) // HACK!!!
 }
 
+// NToS converts a node to a string
 func NToS(node Node) string {
 	return fmt.Sprintf("[%s]:%d", node.IP, node.Port)
 }
 
+// visit a node
+// update record in `nodes` based on whether version handshake succeeded
+// send `getaddr` and wait for `addr` response, adding new entries to
+// `nodes` if we receive one
 func visit(node *Node) {
 	var finished = make(chan bool)
-	//var failed = make(chan bool)
 	var handshakeSuccessful = false
 	peerCfg := &peer.Config{
 		UserAgentName:    "mooniversity",
@@ -147,7 +155,6 @@ func visit(node *Node) {
 			},
 			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
 				if len(msg.AddrList) > 1 {
-					//fmt.Printf("received %d addr from %s\n", len(msg.AddrList), NAToS(addr))
 					addNodes(msg.AddrList)
 					finished <- true
 				}
@@ -158,8 +165,6 @@ func visit(node *Node) {
 	// create peer.Peer instance
 	p, err := peer.NewOutboundPeer(peerCfg, NToS(*node))
 	if err != nil {
-		//fmt.Printf("NewOutboundPeer: %v\n", err)
-		//failed <- true
 		missVisit(*node)
 		return
 	}
@@ -168,31 +173,25 @@ func visit(node *Node) {
 	d := net.Dialer{Timeout: time.Second}
 	conn, err := d.Dial("tcp", p.Addr())
 	if err != nil {
-		//fmt.Printf("net.Dial: %v\n", err)
-		//failed <- true
 		missVisit(*node)
 		return
 	}
 	p.AssociateConnection(conn)
 
 	// wait for completion or timeout
-	//fmt.Println("connected")
 	select {
 	case <-finished:
-	//case <-failed:
-	//missVisit(*node)
 	case <-time.After(time.Second * 3):
 		if !handshakeSuccessful {
-			//fmt.Println("timeout")
 			missVisit(*node)
 		}
 	}
 
 	p.Disconnect()
 	p.WaitForDisconnect()
-	//fmt.Println("disconnected\n")
 }
 
+// loops forever connecting to nodes waiting in `inbox` channel
 func worker() {
 	for true {
 		node := <-inbox
@@ -200,13 +199,13 @@ func worker() {
 	}
 }
 
-func collect() {
+// prints some stats once per second
+func stats() {
 	for true {
 		online := onlineNodes()
 		offline := offlineNodes()
 		fmt.Printf("online %d, offline %d, inbox %d\n",
 			len(online), len(offline), len(inbox))
-		// sleep until next loop
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -221,5 +220,5 @@ func main() {
 	go queryDNS()
 
 	// enter status look
-	collect()
+	stats()
 }
