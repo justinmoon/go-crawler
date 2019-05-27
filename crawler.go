@@ -100,12 +100,11 @@ func untouchedNodes() []Node {
 
 // increment `visitsMissed` on a `nodes` record
 func missVisit(node Node) {
-	node.VisitsMissed = 1
-	//if node.VisitsMissed == -1 {
-	//node.VisitsMissed = 1
-	//} else {
-	//node.VisitsMissed++
-	//}
+	if node.VisitsMissed == -1 {
+		node.VisitsMissed = 1
+	} else {
+		node.VisitsMissed++
+	}
 	// TODO: update timestamp, too
 	writeNode(node)
 }
